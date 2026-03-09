@@ -27,6 +27,15 @@ DELAY      = 0.5
 TIMEOUT    = 20
 TEST_PAGES = int(os.getenv("TEST_PAGES") or 0)
 OUT_DIR    = Path("output")
+
+# صفحات خارجية تُضاف يدوياً في أولها/آخرها
+FRONT_PAGES = [
+    ("المَنهجُ المُتَّبعُ في الموسوعةِ الفِقهيَّةِ", "https://dorar.net/article/1923/%D8%A7%D9%84%D9%85%D9%86%D9%87%D8%AC-%D8%A7%D9%84%D9%85%D8%AA%D8%A8%D8%B9-%D9%81%D9%8A-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%88%D8%B9%D8%A9-%D8%A7%D9%84%D9%81%D9%82%D9%87%D9%8A%D8%A9"),
+    ("اعتماد منهج الموسوعة الفقهية",               "https://dorar.net/article/1983/%D8%A7%D8%B9%D8%AA%D9%85%D8%A7%D8%AF-%D9%85%D9%86%D9%87%D8%AC-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%88%D8%B9%D8%A9-%D8%A7%D9%84%D9%81%D9%82%D9%87%D9%8A%D8%A9"),
+]
+BACK_PAGES = [
+    ("المراجع المعتمدة", "https://dorar.net/refs/feqhia"),
+]
 EPUB_PATH  = OUT_DIR / "feqhia.epub"
 MD_DIR     = OUT_DIR / "md"
 BOOK_TITLE = "الموسوعة الفقهية"
@@ -138,6 +147,46 @@ def numbered_folder(ancestors: list[str], depth: int) -> str:
     name = f"{n:02d}_{safe_name(ancestors[depth])}"
     _folder_names[key] = name
     return name
+
+
+# ── Extra Pages (مقدمة + ملاحق) ──────────────────────────────────────────────
+def fetch_extra_page(title: str, url: str, pid: str, level: int = 1) -> Page | None:
+    """جلب صفحة مقالة أو مرجع وتحويلها لـ Page."""
+    soup = fetch(url)
+    if not soup:
+        return None
+    time.sleep(DELAY)
+
+    # محاولة استخراج المحتوى من عدة حاويات محتملة
+    body = (
+        soup.find("div", id="cntnt")
+        or soup.find("div", class_=lambda c: c and "amiri_custom_content" in c)
+        or soup.find("article")
+        or soup.find("main")
+    )
+    if not body:
+        # fallback: أكبر div في الصفحة
+        divs = soup.find_all("div")
+        body = max(divs, key=lambda d: len(d.get_text()), default=None)
+
+    body_html = BeautifulSoup(str(body), "html.parser").decode_contents() if body else ""
+
+    # تنظيف روابط التنقل والعناصر الزائدة
+    cleaned = BeautifulSoup(body_html, "html.parser")
+    for el in cleaned.find_all("a"):
+        if NAV_TEXT_RE.search(el.get_text()):
+            el.decompose()
+    body_html = cleaned.decode_contents()
+
+    return Page(
+        pid        = pid,
+        url        = url,
+        title      = title,
+        level      = level,
+        breadcrumb = [title],
+        body_html  = body_html,
+        footnotes  = [],
+    )
 
 
 # ── Discovery ─────────────────────────────────────────────────────────────────
@@ -653,19 +702,39 @@ def main() -> None:
     mode = f"TEST ({TEST_PAGES} صفحات)" if TEST_PAGES else "FULL"
     print(f"=== dorar_feqhia_export  [{mode}] ===\n")
 
-    print("1) اكتشاف الصفحات…")
+    print("1) جلب صفحات المقدمة…")
+    front = []
+    for i, (title, url) in enumerate(FRONT_PAGES, 1):
+        pid = f"front{i:02d}"
+        print(f"  {pid}: {title}")
+        p = fetch_extra_page(title, url, pid, level=1)
+        if p:
+            front.append(p)
+
+    print("\n2) اكتشاف صفحات الموسوعة…")
     raw_pages = scrape_all()
     print(f"   {len(raw_pages)} صفحة\n")
 
-    print("2) بناء الهيكل…")
-    items = build_document(raw_pages)
+    print("3) جلب صفحات الملاحق…")
+    back = []
+    for i, (title, url) in enumerate(BACK_PAGES, 1):
+        pid = f"back{i:02d}"
+        print(f"  {pid}: {title}")
+        p = fetch_extra_page(title, url, pid, level=1)
+        if p:
+            back.append(p)
+
+    all_pages = front + raw_pages + back
+
+    print(f"\n4) بناء الهيكل…")
+    items = build_document(all_pages)
     idx_count = sum(1 for i in items if isinstance(i, IndexPage))
     print(f"   {len(items)} عنصر ({idx_count} فهارس تلقائية)\n")
 
-    print("3) بناء EPUB…")
+    print(f"\n5) بناء EPUB…")
     export_epub(items)
 
-    print("4) بناء Markdown…")
+    print("6) بناء Markdown…")
     export_markdown(items)
 
     print("\n✓ اكتمل")
