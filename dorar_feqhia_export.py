@@ -20,25 +20,26 @@ import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 # ── Config ────────────────────────────────────────────────────────────────────
-START_URL  = "https://dorar.net/feqhia"
-PAGE_RE    = re.compile(r"/feqhia/(\d+)")
-SKIP_CRUMBS = 2          # "الرئيسة" + "الموسوعة الفقهية"
-DELAY      = 0.5
-TIMEOUT    = 20
-TEST_PAGES = int(os.getenv("TEST_PAGES") or 0)
-OUT_DIR    = Path("output")
+START_URL   = "https://dorar.net/feqhia"
+PAGE_RE     = re.compile(r"/feqhia/(\d+)")
+SKIP_CRUMBS = 2
+DELAY       = 0.5
+TIMEOUT     = 20
+TEST_PAGES  = int(os.getenv("TEST_PAGES") or 0)
+OUT_DIR     = Path("output")
+EPUB_PATH   = OUT_DIR / "feqhia.epub"
+MD_DIR      = OUT_DIR / "md"
+BOOK_TITLE  = "الموسوعة الفقهية"
 
-# صفحات خارجية تُضاف يدوياً في أولها/آخرها
 FRONT_PAGES = [
-    ("المَنهجُ المُتَّبعُ في الموسوعةِ الفِقهيَّةِ", "https://dorar.net/article/1923/%D8%A7%D9%84%D9%85%D9%86%D9%87%D8%AC-%D8%A7%D9%84%D9%85%D8%AA%D8%A8%D8%B9-%D9%81%D9%8A-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%88%D8%B9%D8%A9-%D8%A7%D9%84%D9%81%D9%82%D9%87%D9%8A%D8%A9"),
-    ("اعتماد منهج الموسوعة الفقهية",               "https://dorar.net/article/1983/%D8%A7%D8%B9%D8%AA%D9%85%D8%A7%D8%AF-%D9%85%D9%86%D9%87%D8%AC-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%88%D8%B9%D8%A9-%D8%A7%D9%84%D9%81%D9%82%D9%87%D9%8A%D8%A9"),
+    ("المَنهجُ المُتَّبعُ في الموسوعةِ الفِقهيَّةِ",
+     "https://dorar.net/article/1923/%D8%A7%D9%84%D9%85%D9%86%D9%87%D8%AC-%D8%A7%D9%84%D9%85%D8%AA%D8%A8%D8%B9-%D9%81%D9%8A-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%88%D8%B9%D8%A9-%D8%A7%D9%84%D9%81%D9%82%D9%87%D9%8A%D8%A9"),
+    ("اعتماد منهج الموسوعة الفقهية",
+     "https://dorar.net/article/1983/%D8%A7%D8%B9%D8%AA%D9%85%D8%A7%D8%AF-%D9%85%D9%86%D9%87%D8%AC-%D8%A7%D9%84%D9%85%D9%88%D8%B3%D9%88%D8%B9%D8%A9-%D8%A7%D9%84%D9%81%D9%82%D9%87%D9%8A%D8%A9"),
 ]
 BACK_PAGES = [
     ("المراجع المعتمدة", "https://dorar.net/refs/feqhia"),
 ]
-EPUB_PATH  = OUT_DIR / "feqhia.epub"
-MD_DIR     = OUT_DIR / "md"
-BOOK_TITLE = "الموسوعة الفقهية"
 
 HEADERS = {
     "User-Agent": (
@@ -129,15 +130,11 @@ def safe_name(s: str, maxlen: int = 80) -> str:
     return s[:maxlen]
 
 
-# عداد ترقيم المجلدات لكل مستوى: {(parent_key): counter}
 _folder_counters: dict[tuple, int] = {}
-_folder_names:    dict[tuple, str] = {}   # key → اسم المجلد المرقم
+_folder_names:    dict[tuple, str] = {}
+
 
 def numbered_folder(ancestors: list[str], depth: int) -> str:
-    """
-    أعطِ كل عقدة اسماً مرقماً بناءً على موقعها بين أخواتها.
-    مثال: "01_كتابُ_الطَّهارةِ / 03_الباب_الثالث"
-    """
     key        = tuple(ancestors[:depth + 1])
     if key in _folder_names:
         return _folder_names[key]
@@ -149,34 +146,31 @@ def numbered_folder(ancestors: list[str], depth: int) -> str:
     return name
 
 
-# ── Extra Pages (مقدمة + ملاحق) ──────────────────────────────────────────────
+def _ancestors_to_path(ancestors: list[str]) -> Path:
+    parts = [numbered_folder(ancestors, d) for d in range(len(ancestors))]
+    return MD_DIR.joinpath(*parts)
+
+
+# ── Extra Pages ───────────────────────────────────────────────────────────────
 def fetch_extra_page(title: str, url: str, pid: str, level: int = 1) -> Page | None:
-    """جلب صفحة مقالة أو مرجع وتحويلها لـ Page."""
+    """مقالات article/XXXX — المحتوى في div#cntnt"""
     soup = fetch(url)
     if not soup:
         return None
     time.sleep(DELAY)
 
-    # محاولة استخراج المحتوى من عدة حاويات محتملة
     body = (
         soup.find("div", id="cntnt")
         or soup.find("div", class_=lambda c: c and "amiri_custom_content" in c)
-        or soup.find("article")
-        or soup.find("main")
     )
     if not body:
-        # fallback: أكبر div في الصفحة
         divs = soup.find_all("div")
         body = max(divs, key=lambda d: len(d.get_text()), default=None)
 
-    body_html = BeautifulSoup(str(body), "html.parser").decode_contents() if body else ""
-
-    # تنظيف روابط التنقل والعناصر الزائدة
-    cleaned = BeautifulSoup(body_html, "html.parser")
+    cleaned = BeautifulSoup(str(body), "html.parser") if body else BeautifulSoup("", "html.parser")
     for el in cleaned.find_all("a"):
         if NAV_TEXT_RE.search(el.get_text()):
             el.decompose()
-    body_html = cleaned.decode_contents()
 
     return Page(
         pid        = pid,
@@ -184,32 +178,68 @@ def fetch_extra_page(title: str, url: str, pid: str, level: int = 1) -> Page | N
         title      = title,
         level      = level,
         breadcrumb = [title],
-        body_html  = body_html,
+        body_html  = cleaned.decode_contents(),
+        footnotes  = [],
+    )
+
+
+def fetch_refs_page(title: str, url: str, pid: str) -> Page | None:
+    """
+    صفحة المراجع المعتمدة — كل مرجع في <article class="border-bottom py-4">
+    يُحوَّل إلى فقرة: اسم المرجع bold ثم بياناته في نفس السطر.
+    """
+    soup = fetch(url)
+    if not soup:
+        return None
+    time.sleep(DELAY)
+
+    articles = soup.find_all("article", class_="border-bottom")
+    if not articles:
+        return fetch_extra_page(title, url, pid)
+
+    rows = []
+    for art in articles:
+        h5   = art.find("h5")
+        name = h5.get_text(strip=True) if h5 else ""
+        fields = {}
+        for div in art.find_all("div", class_="d-block"):
+            for strong in div.find_all("strong"):
+                spans = strong.find_all("span")
+                if spans:
+                    label = strong.get_text(strip=True).split(spans[0].get_text(strip=True))[0].strip().rstrip(":")
+                    value = spans[0].get_text(strip=True)
+                    if label and value and value != "بدون":
+                        fields[label] = value
+
+        meta = " | ".join(f"{k}: {v}" for k, v in fields.items())
+        rows.append(
+            f"<p><strong>{name}</strong>"
+            f"{(' — ' + meta) if meta else ''}</p>"
+        )
+
+    return Page(
+        pid        = pid,
+        url        = url,
+        title      = title,
+        level      = 1,
+        breadcrumb = [title],
+        body_html  = "\n".join(rows),
         footnotes  = [],
     )
 
 
 # ── Discovery ─────────────────────────────────────────────────────────────────
 def discover_urls() -> list[str]:
-    """
-    feqhia: نستخرج كل IDs من ul#mtree في صفحة الفهرس (مرتبة تلقائياً حسب TOC)،
-    ثم نبني URLs مرتبة. هذا أدق من تتبع زر التالي لأن الترتيب يعكس الفهرس الفعلي.
-    """
     print(f"  جلب فهرس الروابط من {START_URL}…")
     soup = fetch(START_URL)
     if not soup:
         return []
 
-    mtree = soup.find("ul", id="mtree")
-    if not mtree:
-        print("  [تحذير] لم يُعثر على ul#mtree — جاري البحث عن بديل…")
-        mtree = soup.find("ul", class_="dorar_accordion_treeview")
-
+    mtree = soup.find("ul", id="mtree") or soup.find("ul", class_="dorar_accordion_treeview")
     if not mtree:
         print("  [خطأ] لم يُعثر على قائمة الفهرس")
         return []
 
-    # استخرج الروابط بترتيب ظهورها في الـ DOM (= ترتيب الفهرس)
     seen, urls = set(), []
     base = "https://dorar.net"
     for a in mtree.find_all("a", href=PAGE_RE):
@@ -219,17 +249,14 @@ def discover_urls() -> list[str]:
             urls.append(urljoin(base, href))
 
     print(f"  {len(urls)} رابط مرتب حسب الفهرس")
-
     if TEST_PAGES:
         urls = urls[:TEST_PAGES]
         print(f"  [وضع الاختبار] أول {TEST_PAGES} روابط فقط")
-
     return urls
 
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 def page_title(soup: BeautifulSoup) -> str:
-    # h1 دائماً "الموسوعة الفقهية" — نستخدم og:title
     og = soup.find("meta", property="og:title")
     if og and og.get("content"):
         return og["content"].split(" - ")[0].strip()
@@ -241,11 +268,7 @@ def page_breadcrumb(soup: BeautifulSoup) -> list[str]:
     bc_el = soup.find("ol", class_="breadcrumb")
     if not bc_el:
         return []
-    return [
-        li.get_text(strip=True)
-        for li in bc_el.find_all("li")
-        if li.get_text(strip=True)
-    ]
+    return [li.get_text(strip=True) for li in bc_el.find_all("li") if li.get_text(strip=True)]
 
 
 def extract_content(soup: BeautifulSoup, pid: str) -> tuple[str, list[tuple[str, str]]]:
@@ -255,15 +278,12 @@ def extract_content(soup: BeautifulSoup, pid: str) -> tuple[str, list[tuple[str,
     if not cntnt:
         return "", []
 
-    # نسخة قابلة للتعديل
     body = BeautifulSoup(str(cntnt), "html.parser")
 
-    # حذف روابط التشعب
     for a in body.find_all("a", href=True):
         if "/hadith/sharh/" in a["href"] or "/tafseer/" in a["href"]:
             a.decompose()
 
-    # حذف قسم "المزيد"
     for h3 in body.find_all("h3", id="more-titles"):
         nxt = h3.find_next_sibling("ul")
         if nxt:
@@ -283,7 +303,6 @@ def extract_content(soup: BeautifulSoup, pid: str) -> tuple[str, list[tuple[str,
         if NAV_TEXT_RE.search(a.get_text()):
             a.decompose()
 
-    # الحواشي
     footnotes: list[tuple[str, str]] = []
     fn_n = 0
     for span in body.find_all("span", class_="tip"):
@@ -297,7 +316,6 @@ def extract_content(soup: BeautifulSoup, pid: str) -> tuple[str, list[tuple[str,
         )
         span.replace_with(anchor)
 
-    # Spans الخاصة
     for span in body.find_all("span"):
         cls = set(span.get("class", []))
         for a in span.find_all("a"):
@@ -307,7 +325,7 @@ def extract_content(soup: BeautifulSoup, pid: str) -> tuple[str, list[tuple[str,
         if "aaya" in cls:
             span.replace_with(f"﴿{txt}﴾")
         elif "hadith" in cls:
-            span.replace_with(txt)   # الأقواس موجودة أصلاً في النص
+            span.replace_with(txt)
         elif "sora" in cls:
             span.replace_with(PUA_RE.sub("", txt))
         elif "title-2" in cls:
@@ -415,33 +433,26 @@ def html_to_md(html: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", md).strip()
 
 
-def _ancestors_to_path(ancestors: list[str]) -> Path:
-    """حوّل قائمة الأجداد إلى مسار مرقم."""
-    parts = [numbered_folder(ancestors, d) for d in range(len(ancestors))]
-    return MD_DIR.joinpath(*parts)
-
-
 def export_markdown(items: list[Item]) -> None:
     MD_DIR.mkdir(parents=True, exist_ok=True)
-    # تمرير أول لتسجيل ترتيب الأجداد (ضروري لضمان ترقيم متسق)
+
+    # تمرير أول: تسجيل ترتيب المجلدات
     for item in items:
-        ancestors = (
-            item.breadcrumb[SKIP_CRUMBS:]
-            if isinstance(item, Page)
-            else [item.title]   # IndexPage يُسجَّل عند مروره
-        )
-        if isinstance(item, Page):
+        if isinstance(item, Page) and len(item.breadcrumb) > SKIP_CRUMBS + 1:
+            ancestors = item.breadcrumb[SKIP_CRUMBS:]
             for d in range(len(ancestors) - 1):
                 numbered_folder(ancestors, d)
 
-    # تمرير ثانٍ للكتابة
     for item in items:
         if isinstance(item, Page):
             ancestors = item.breadcrumb[SKIP_CRUMBS:]
-            folder    = _ancestors_to_path(ancestors[:-1]) if len(ancestors) > 1 else MD_DIR
+            if len(ancestors) > 1:
+                folder = _ancestors_to_path(ancestors[:-1])
+            else:
+                folder = MD_DIR
             folder.mkdir(parents=True, exist_ok=True)
 
-            n_file   = f"{item.pid}_{safe_name(item.title)}.md"
+            fname    = f"{item.pid}_{safe_name(item.title)}.md"
             hashes   = "#" * item.level
             md       = html_to_md(item.body_html)
             fn_block = ""
@@ -453,16 +464,18 @@ def export_markdown(items: list[Item]) -> None:
                 f"> المصدر: {item.url}\n\n"
                 f"{md}{fn_block}\n"
             )
-            (folder / n_file).write_text(content, encoding="utf-8")
+            (folder / fname).write_text(content, encoding="utf-8")
 
         elif isinstance(item, IndexPage):
-            # ابحث عن المسار المسجل لهذا العنوان
             key = next(
-                (k for k, v in _folder_names.items() if k[-1] == item.title and len(k) == item.level),
+                (k for k, v in _folder_names.items()
+                 if k[-1] == item.title and len(k) == item.level),
                 None,
             )
             if key:
-                folder = MD_DIR.joinpath(*[_folder_names[tuple(key[:d+1])] for d in range(len(key))])
+                folder = MD_DIR.joinpath(
+                    *[_folder_names[tuple(key[:d + 1])] for d in range(len(key))]
+                )
             else:
                 folder = MD_DIR / f"{item.pid}_{safe_name(item.title)}"
             folder.mkdir(parents=True, exist_ok=True)
@@ -493,6 +506,7 @@ p { margin: 0.4em 0 0.9em; text-align: justify; }
 .footnotes { border-top: 1px solid #ccc; margin-top: 2em; padding-top: 0.8em; }
 sup a { color: #888; font-size: 0.8em; text-decoration: none; }
 ol, ul { margin: 0.4em 0; padding-right: 1.5em; }
+.ref-entry { border-bottom: 1px solid #eee; padding: 0.8em 0; }
 """
 
 _XHTML_TMPL = """\
@@ -546,7 +560,7 @@ def _cover_xhtml(total_pages: int) -> str:
 
 
 def _build_toc_tree(entries: list[tuple]) -> list[dict]:
-    root: list[dict] = []
+    root:  list[dict] = []
     stack: list[tuple[int, list]] = []
     for level, title, pid in entries:
         node = {"level": level, "title": title, "pid": pid, "children": []}
@@ -612,9 +626,9 @@ def export_epub(items: list[Item]) -> None:
     uid   = str(uuid.uuid4())
     pages = [i for i in items if isinstance(i, Page)]
 
+    man_items:  list[str] = []
+    spine_refs: list[str] = []
     toc_entries: list[tuple] = []
-    man_items:   list[str]   = []
-    spine_refs:  list[str]   = []
 
     with zipfile.ZipFile(EPUB_PATH, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
@@ -654,7 +668,6 @@ def export_epub(items: list[Item]) -> None:
                 f'<item id="{iid}" href="pages/{fn}" media-type="application/xhtml+xml"/>'
             )
             spine_refs.append(f'<itemref idref="{iid}"/>')
-            # TOC: IndexPages فقط (كتاب/باب/فصل/مبحث) — بدون صفحات المحتوى الفردية
             if isinstance(item, IndexPage):
                 toc_entries.append((item.level, item.title, item.pid))
 
@@ -720,7 +733,7 @@ def main() -> None:
     for i, (title, url) in enumerate(BACK_PAGES, 1):
         pid = f"back{i:02d}"
         print(f"  {pid}: {title}")
-        p = fetch_extra_page(title, url, pid, level=1)
+        p = fetch_refs_page(title, url, pid)
         if p:
             back.append(p)
 
@@ -731,7 +744,7 @@ def main() -> None:
     idx_count = sum(1 for i in items if isinstance(i, IndexPage))
     print(f"   {len(items)} عنصر ({idx_count} فهارس تلقائية)\n")
 
-    print(f"\n5) بناء EPUB…")
+    print("5) بناء EPUB…")
     export_epub(items)
 
     print("6) بناء Markdown…")
