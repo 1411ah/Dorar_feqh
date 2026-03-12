@@ -170,7 +170,9 @@ def fetch_extra_page(title: str, url: str, pid: str, level: int = 1) -> Page | N
     cleaned = BeautifulSoup(str(body), "html.parser") if body else BeautifulSoup("", "html.parser")
     for el in cleaned.find_all("a"):
         if NAV_TEXT_RE.search(el.get_text()):
-            el.decompose()
+            el.decompose()   # روابط تنقل — لا نص مفيد فيها
+        else:
+            el.unwrap()      # روابط نصية — نحتفظ بالنص
 
     return Page(
         pid        = pid,
@@ -282,7 +284,7 @@ def extract_content(soup: BeautifulSoup, pid: str) -> tuple[str, list[tuple[str,
 
     for a in body.find_all("a", href=True):
         if "/hadith/sharh/" in a["href"] or "/tafseer/" in a["href"]:
-            a.decompose()
+            a.unwrap()   # رابط شرح خارجي — النص محتوى أصيل نحتفظ به
 
     for h3 in body.find_all("h3", id="more-titles"):
         nxt = h3.find_next_sibling("ul")
@@ -319,7 +321,7 @@ def extract_content(soup: BeautifulSoup, pid: str) -> tuple[str, list[tuple[str,
     for span in body.find_all("span"):
         cls = set(span.get("class", []))
         for a in span.find_all("a"):
-            a.decompose()
+            a.unwrap()   # روابط داخل آية/حديث — النص جزء من المحتوى
         txt = span.get_text(strip=True)
 
         if "aaya" in cls:
